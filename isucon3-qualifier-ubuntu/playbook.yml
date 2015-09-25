@@ -1,0 +1,192 @@
+- hosts: all
+  sudo: yes
+  tasks:
+    - apt: name={{item}}
+      with_items:
+        - autoconf
+        - automake
+        - curl
+        - build-essential
+        - patch
+        - pkg-config
+
+    # memcached
+    - apt: name=memcached
+    - copy: src=files/etc/sysconfig/memcached dest=/etc/defaults/
+    - service: name=memcached enabled=yes state=started
+
+    # httpd
+    - apt: name={{item}}
+      with_items:
+        - apache2
+        - php5
+        - php5-mysql
+        - php5-memcached
+#         - php5-pecl-igbinary
+        - php5-xmlrpc
+        - mysql-server-5.6
+        - libmysqlclient-dev
+    - copy: src=files/etc/httpd/conf.d/isucon.conf dest=/etc/apache2/conf-enabled/
+    - service: name=apache2 enabled=yes state=started
+
+    # user isucon
+    - user: name=isucon
+    - copy: src=files/home/isucon/env.sh dest=/home/isucon/ owner=isucon group=isucon mode=755
+    - copy: src=files/etc/sudoers.d/isucon dest=/etc/sudoers.d/
+
+    - git: repo=https://github.com/kayac/isucon3.git dest=/tmp/isucon3
+    - shell: |
+        set -e
+        rsync -a /tmp/isucon3/qualifier/ /home/isucon/
+        chown -R isucon:isucon /home/isucon/
+
+    # mysql
+    - service: name=mysql enabled=yes state=started
+    - file: path=/opt/isucon/bin state=directory owner=isucon
+    - file: path=/opt/isucon/data state=directory owner=isucon
+    - copy: src=files/opt/isucon/data/init.sql.gz dest=/opt/isucon/data/
+    - shell: |
+        set -e
+        ( echo ; echo Y ; echo root ; echo root ; echo Y ; echo Y ; echo Y ; echo Y ) | mysql_secure_installation || true
+        mysqladmin -proot create isucon && echo ok
+        mysqladmin -proot create test && echo ok
+        echo "GRANT ALL ON isucon.* TO isucon@'%'" | mysql -proot && echo ok
+        gzip -dc /opt/isucon/data/init.sql.gz | mysql -proot isucon && echo ok
+        cat /usr/share/mysql/innodb_memcached_config.sql | mysql -proot && echo ok
+        echo "install plugin daemon_memcached soname \"libmemcached.so\"" | mysql -proot && echo ok
+        echo "[mysqld]" > /usr/my.cnf && echo ok
+      args:
+        creates: /usr/my.cnf
+      notify: restart mysqld
+    - file: path=/usr/my.cnf state=absent
+
+    # xbuild
+    - apt: name=gcc
+    - sudo_user: isucon
+      git: repo=https://github.com/tagomoris/xbuild.git dest=/home/isucon/.xbuild
+
+    # go
+    - sudo_user: isucon
+      shell: ~/.xbuild/go-install 1.3 /home/isucon/local/go
+      args:
+        creates: /home/isucon/local/go/bin/go
+    - sudo_user: isucon
+      shell: |
+        bash -c '
+        set -e
+        cd $HOME
+        source ./env.sh
+        cd webapp/go/
+        go get github.com/go-sql-driver/mysql
+        go get github.com/gorilla/mux
+        go get github.com/gorilla/sessions
+        go get github.com/bradfitz/gomemcache/memcache
+        go build -o app
+        '
+      args:
+        creates: /home/isucon/webapp/go/app
+
+    # nodejs
+    - sudo_user: isucon
+      shell: cd $HOME; .xbuild/node-install v0.10.20 /home/isucon/local/node-v0.10
+      args:
+        creates: /home/isucon/local/node-v0.10/bin/node
+    - sudo_user: isucon
+      shell: |
+        bash -c '
+        set -e
+        cd $HOME
+        source ./env.sh
+        cd webapp/nodejs/
+        npm install
+        '
+      args:
+        creates: /home/isucon/webapp/nodejs/node_modules
+
+    # perl
+    - sudo_user: isucon
+      shell: cd $HOME ; .xbuild/perl-install 5.18.1 /home/isucon/local/perl-5.18
+      args:
+        creates: /home/isucon/local/perl-5.18/bin/perl
+    - sudo_user: isucon
+      shell: |
+        bash -c '
+        set -e
+        cd $HOME
+        source ./env.sh
+        cd webapp/perl/
+        curl -L https://cpanmin.us | perl - Carton
+        carton install
+        '
+
+    # ruby
+    - apt: name=libssl-dev
+    - apt: name=libreadline-dev
+    - apt: name=zlib1g-dev
+    - sudo_user: isucon
+      #shell: .xbuild/ruby-install 2.0.0-p247 /home/isucon/local/ruby-2.0
+      shell: cd $HOME ; .xbuild/ruby-install 2.0.0-p645 /home/isucon/local/ruby-2.0
+      args:
+        creates: /home/isucon/local/ruby-2.0/bin/ruby
+    - sudo_user: isucon
+      shell: |
+        bash -c '
+        set -e
+        cd $HOME
+        source ./env.sh
+        cd webapp/ruby/
+        gem install bundler foreman
+        bundle install --deployment --without development
+        '
+
+    # python
+    - apt: name=patch
+    - sudo_user: isucon
+      shell: cd $HOME ; .xbuild/python-install 3.3.2 /home/isucon/local/python-3.3
+      args:
+        creates: /home/isucon/local/python-3.3/bin/python
+    - sudo_user: isucon
+      shell: |
+        bash -c '
+        set -e
+        cd $HOME
+        source ./env.sh
+        cd webapp/python/
+        easy_install flask gunicorn python3-memcached PyMySQL3
+        '
+
+    # bench
+    - apt: name=pigz
+    - apt: name=libxml2-dev
+    - sudo_user: isucon
+      shell: |
+        bash -c '
+        set -e
+        cd $HOME
+        source ./env.sh
+        cd qualifier_bench
+        go get github.com/moovweb/gokogiri
+        go get github.com/wsxiaoys/terminal
+        go build
+        '
+
+    # supervisor package is too old
+    # - yum: name=supervisor
+    - apt: name=supervisor
+    - copy: src=files/etc/sysconfig/supervisord dest=/etc/default/
+    - copy: src=files/etc/supervisord.conf dest=/etc/supervisor/
+    - service: name=supervisor enabled=yes state=started
+
+    # cleanup
+    - file: path=/home/isucon/.xbuild state=absent
+    - file: path=/tmp/isucon3 state=absent
+    - file: path=/var/log/mysqld.log state=absent
+    - shell: |
+        rm -f /tmp/*-build*
+        rm -f /tmp/python-*
+        rm -f /tmp/isucon*
+
+  handlers:
+    - name: restart mysqld
+      service: name=mysql state=restarted
+
