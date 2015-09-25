@@ -26,6 +26,9 @@
         - php5-xmlrpc
         - mysql-server-5.6
         - libmysqlclient-dev
+    - shell: a2enmod proxy_http
+      args:
+        creates: /etc/apache2/mods-enabled/proxy.conf
     - copy: src=files/etc/httpd/conf.d/isucon.conf dest=/etc/apache2/conf-enabled/
     - service: name=apache2 enabled=yes state=started
 
